@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.sahoora.cxf.camel.webinars.BlueprintBeanPropertiesOverrideFromFileRouteTest
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.45 sec

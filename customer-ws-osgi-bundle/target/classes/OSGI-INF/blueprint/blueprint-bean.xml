@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<blueprint xmlns="http://www.osgi.org/xmlns/blueprint/v1.0.0"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:cm="http://aries.apache.org/blueprint/xmlns/blueprint-cm/v1.1.0"
+           xmlns:cxf="http://camel.apache.org/schema/blueprint/cxf"
+           xsi:schemaLocation="
+         http://www.osgi.org/xmlns/blueprint/v1.0.0 https://www.osgi.org/xmlns/blueprint/v1.0.0/blueprint.xsd
+         http://camel.apache.org/schema/blueprint http://camel.apache.org/schema/blueprint/camel-blueprint.xsd
+         http://aries.apache.org/blueprint/xmlns/blueprint-cm/v1.1.0 http://aries.apache.org/schemas/blueprint-cm/blueprint-cm-1.1.0.xsd
+         http://camel.apache.org/schema/blueprint/cxf http://camel.apache.org/schema/cxf/camel-cxf-blueprint.xsd">
+
+    <cm:property-placeholder persistent-id="HelloBean" update-strategy="reload">
+        <cm:default-properties>
+            <cm:property name="greeting" value="Hi from Camel"/>
+            <cm:property name="cxfEndpoint" value="cxf:bean:customer-ws"/>
+        </cm:default-properties>
+    </cm:property-placeholder>
+
+    <bean id="helloBean" class="com.sahoora.cxf.camel.webinars.HelloBean">
+        <property name="say" value="${greeting}"/>
+    </bean>
+
+    <!--
+      Here, we define the dead-letter channel configuration we want to use.  We want to retry delivering a failed exchange
+      twice and we also want to use exponential backoff between retries (so first retry after 1 second, second retry another
+      2 seconds later).  After a total of 3 failed deliveries (1 initial delivery plus our 2 redeliveries), the message will
+      be sent to the configured dead letter uri (direct:deadletter).
+    -->
+    <bean id="myDeadLetterErrorHandler" class="org.apache.camel.builder.DeadLetterChannelBuilder">
+        <property name="deadLetterUri" value="direct:deadletter"/>
+        <property name="redeliveryPolicy">
+            <bean class="org.apache.camel.processor.RedeliveryPolicy">
+                <property name="maximumRedeliveries" value="2"/>
+                <property name="useExponentialBackOff" value="true"/>
+            </bean>
+        </property>
+    </bean>
+
+    <cxf:cxfEndpoint id="customer-ws"
+                     address="/Customer"
+                     endpointName="c:SOAPOverHTTP"
+                     serviceName="c:CustomerService"
+                     serviceClass="com.sahoora.demo.wsdl.customerservice.CustomerService"
+                     xmlns:c="http://demo.sahoora.com/wsdl/CustomerService/"/>
+
+    <camelContext id="blueprint-bean-context" xmlns="http://camel.apache.org/schema/blueprint">
+
+        <!--
+        Using <onException/>, we can define recovery scenarios for specific exceptions.
+        We don't specify a redelivery policy and mark the exception handled to ensure processing will not be retried for this exception.
+        -->
+        <onException>
+            <exception>com.sahoora.cxf.camel.error.ValidationException</exception>
+            <handled>
+                <constant>true</constant>
+            </handled>
+            <transform>
+                <simple>Error reported: ${exception.message} - cannot process this message.</simple>
+            </transform>
+            <to uri="activemq:queue:validationFailed"/>
+        </onException>
+
+
+        <route id="timerToLog">
+            <from uri="timer:foo?period=5000"/>
+            <setBody>
+                <method ref="helloBean" method="hello"/>
+            </setBody>
+            <log message="The message contains ${body}"/>
+            <to uri="mock:result"/>
+        </route>
+
+        <route id="cxfToCamel" errorHandlerRef="myDeadLetterErrorHandler">
+            <from uri="properties:{{cxfEndpoint}}"/>
+            <choice>
+                <when>
+                    <simple>${in.header.operationName} == 'updateCustomer'</simple>
+                    <to uri="updateCustomer"/>
+                </when>
+                <when>
+                    <simple>${in.header.operationName} == 'lookupCustomer'</simple>
+                    <to uri="lookupCustomer"/>
+                </when>
+                <when>
+                    <simple>${in.header.operationName} == 'getCustomerStatus'</simple>
+                    <to uri="getCustomerStatus"/>
+                </when>
+            </choice>
+        </route>
+
+        <!--
+          This route starts with the direct:deadletter endpoint we used in the 'myDeadLetterErrorHandler' bean definition,
+          so any exchanges that have failed delivery 3 times will be sent to this route.  The route itself logs a human-friendly
+          error message and afterwards stores the failed message in the work/errors/deadletter folder.
+        -->
+        <route id="dlcRoute">
+            <from uri="direct:deadletter"/>
+            <!--<log message="Message was moved to the dead letter channel"/>-->
+            <to uri="activemq:queue:deadletter"/>
+        </route>
+
+    </camelContext>
+
+    <bean id="updateCustomer" class="com.sahoora.cxf.camel.pojo.UpdateCustomerProcessor"/>
+
+    <bean id="getCustomerStatus" class="com.sahoora.cxf.camel.pojo.GetCustomerStatusProcessor"/>
+
+    <bean id="lookupCustomer" class="com.sahoora.cxf.camel.pojo.LookupCustomerProcessor"/>
+
+
+    <bean id="jmsConnectionFactory" class="org.apache.activemq.ActiveMQConnectionFactory">
+        <property name="brokerURL" value="vm://localhost:61616"/>
+    </bean>
+    <bean id="pooledConnectionFactory" class="org.apache.activemq.pool.PooledConnectionFactory"
+          init-method="start" destroy-method="stop">
+        <property name="maxConnections" value="8"/>
+        <property name="connectionFactory" ref="jmsConnectionFactory"/>
+    </bean>
+    <bean id="jmsConfig" class="org.apache.camel.component.jms.JmsConfiguration">
+        <property name="connectionFactory" ref="pooledConnectionFactory"/>
+        <property name="concurrentConsumers" value="10"/>
+    </bean>
+    <bean id="activemq" class="org.apache.activemq.camel.component.ActiveMQComponent">
+        <property name="configuration" ref="jmsConfig"/>
+        <!-- If transacted=true then enable CACHE_CONSUMER (if not using XA) to run faster. See more details at: http://camel.apache.org/jms -->
+        <!--  <property name="transacted" value="true"/> <property name="cacheLevelName" value="CACHE_CONSUMER"/> -->
+    </bean>
+
+</blueprint>
